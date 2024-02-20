@@ -29,6 +29,41 @@ Camera cameraFromMessage(const sensor_msgs::CameraInfo& camera_info) {
   return camera;
 }
 
+// Convert camera info message to NVBlox stereo camera object
+// Assume rectified images for stereo
+// Use P (projection matrix) and not K (raw camera matrix)
+Camera cameraFromMessages(const sensor_msgs::CameraInfo& left_camera_info,
+                          const sensor_msgs::CameraInfo& right_camera_info) {
+  ROS_DEBUG("fu: %f, fv: %f, cu: %f, cv: %f, tx: %f, cx': %f, width: %i, height: %i",
+            left_camera_info.P[0], left_camera_info.P[5],
+            left_camera_info.P[2], left_camera_info.P[6],
+            right_camera_info.P[3] / right_camera_info.P[0],
+            right_camera_info.P[2],
+            left_camera_info.width, left_camera_info.height);
+  Camera camera(left_camera_info.P[0], left_camera_info.P[5],
+                left_camera_info.P[2], left_camera_info.P[6],
+                left_camera_info.width, left_camera_info.height);
+
+  return camera;
+}
+
+QMatrix qMatFromMessages(const sensor_msgs::CameraInfo& left_camera_info,
+                         const sensor_msgs::CameraInfo& right_camera_info) {
+    auto qMatrix = QMatrix{ };
+
+    qMatrix.fx = left_camera_info.P[0];
+    qMatrix.fy = left_camera_info.P[5];
+    qMatrix.cx = left_camera_info.P[2];
+    qMatrix.cy = left_camera_info.P[6];
+
+    qMatrix.tx = right_camera_info.P[3] / right_camera_info.P[0];
+    qMatrix.cxPrime = right_camera_info.P[2];
+
+    qMatrix.initialized = true;
+
+    return qMatrix;
+}
+
 // Convert image to GPU image
 bool colorImageFromImageMessage(const sensor_msgs::ImageConstPtr& image_msg,
                                 ColorImage* color_image) {
@@ -109,14 +144,17 @@ struct DivideBy1000 : public thrust::unary_function<uint16_t, float> {
 
 // Convert image to depth frame object
 bool depthImageFromImageMessage(const sensor_msgs::ImageConstPtr& image_msg,
-                                DepthImage* depth_image) {
+                                DepthImage* depth_image,
+                                const std::optional<QMatrix>& Q) {
   CHECK_NOTNULL(depth_image);
   // If the image is a float, we can just copy it over directly.
   // If the image is int16, we need to divide by 1000 to get the correct
   // format for us.
 
   // First check if we actually have a valid image here.
-  if (image_msg->encoding != "32FC1" && image_msg->encoding != "16UC1") {
+  if (image_msg->encoding != "32FC1" &&
+      image_msg->encoding != "16UC1" &&
+      image_msg->encoding != "mono16") {
     return false;
   }
 
@@ -155,6 +193,34 @@ bool depthImageFromImageMessage(const sensor_msgs::ImageConstPtr& image_msg,
                                       float_depth_buffer.data(),
                                       MemoryType::kDevice);
     }
+  } else if (image_msg->encoding =="mono16") {
+    // Then we have to just go byte-by-byte and convert this. This is a massive
+    // pain and slow. We need to find a better way to do this; on GPU or
+    // through openCV.
+    if (!Q)
+      return false;
+
+    auto qMatrix = Q.value();
+
+    const uint16_t* char_depth_buffer =
+      reinterpret_cast<const uint16_t*>(&image_msg->data[0]);
+    const size_t numel = image_msg->height * image_msg->width;
+
+    std::vector<float> float_depth_buffer(numel);
+
+    for (size_t i = 0; i < numel; i++) {
+      const double x = static_cast<double>(i % image_msg->width);
+      const double y = static_cast<double>(i / image_msg->width);
+
+      const auto disparity = static_cast<double>(char_depth_buffer[i]) / 16.0;
+
+      const auto point = qMatrix.reprojectPoint(x, y, disparity);
+
+      float_depth_buffer[i] = static_cast<float>(point(2));
+    }
+    depth_image->populateFromBuffer(image_msg->height, image_msg->width,
+                                    float_depth_buffer.data(),
+                                    MemoryType::kDevice);
   }
 
   return true;

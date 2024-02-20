@@ -52,8 +52,7 @@ NvbloxNode::NvbloxNode(ros::NodeHandle& nh, ros::NodeHandle& nh_private)
   // - Integrators
   const std::string mapper_name = "mapper";
 
-  mapper_ = std::make_shared<Mapper>(voxel_size_, MemoryType::kDevice,
-                                     static_projective_layer_type_);
+  mapper_ = std::make_shared<Mapper>(voxel_size_, MemoryType::kDevice, static_projective_layer_type_);
 
   initializeMapper(mapper_.get(), nh_private_);
 
@@ -172,12 +171,16 @@ void NvbloxNode::subscribeToTopics() {
     depth_camera_info_sub_.subscribe(nh_, "depth/camera_info",
                                      maximum_sensor_message_queue_length_);
 
+    right_camera_info_sub_.subscribe(nh_, "right/camera_info",
+                                     maximum_sensor_message_queue_length_);
+
     timesync_depth_.reset(new message_filters::Synchronizer<time_policy_t>(
         time_policy_t(maximum_sensor_message_queue_length_), depth_sub_,
-        depth_camera_info_sub_));
+        depth_camera_info_sub_, right_camera_info_sub_));
     timesync_depth_->registerCallback(std::bind(&NvbloxNode::depthImageCallback,
                                                 this, std::placeholders::_1,
-                                                std::placeholders::_2));
+                                                std::placeholders::_2,
+                                                std::placeholders::_3));
   }
 
   if (use_color_) {
@@ -187,8 +190,8 @@ void NvbloxNode::subscribeToTopics() {
     color_camera_info_sub_.subscribe(nh_, "color/camera_info",
                                      maximum_sensor_message_queue_length_);
 
-    timesync_color_.reset(new message_filters::Synchronizer<time_policy_t>(
-        time_policy_t(maximum_sensor_message_queue_length_), color_sub_,
+    timesync_color_.reset(new message_filters::Synchronizer<color_time_policy_t>(
+        color_time_policy_t(maximum_sensor_message_queue_length_), color_sub_,
         color_camera_info_sub_));
     timesync_color_->registerCallback(std::bind(&NvbloxNode::colorImageCallback,
                                                 this, std::placeholders::_1,
@@ -297,8 +300,12 @@ void NvbloxNode::poseCallback(
 
 void NvbloxNode::depthImageCallback(
     const sensor_msgs::ImageConstPtr& depth_img_ptr,
-    const sensor_msgs::CameraInfo::ConstPtr& camera_info_msg) {
-  pushMessageOntoQueue({depth_img_ptr, camera_info_msg}, &depth_image_queue_,
+    const sensor_msgs::CameraInfo::ConstPtr& left_camera_info_msg,
+    const sensor_msgs::CameraInfo::ConstPtr& right_camera_info_msg) {
+  using ImageInfoMsgPair =
+      std::tuple<sensor_msgs::ImageConstPtr, sensor_msgs::CameraInfo::ConstPtr, sensor_msgs::CameraInfo::ConstPtr>;
+  const auto msg = ImageInfoMsgPair{depth_img_ptr, left_camera_info_msg, right_camera_info_msg};
+  pushMessageOntoQueue(msg, &depth_image_queue_,
                        &depth_queue_mutex_);
 }
 
@@ -317,9 +324,9 @@ void NvbloxNode::pointcloudCallback(
 
 void NvbloxNode::processDepthQueue(const ros::TimerEvent& /*event*/) {
   using ImageInfoMsgPair =
-      std::pair<sensor_msgs::ImageConstPtr, sensor_msgs::CameraInfo::ConstPtr>;
+      std::tuple<sensor_msgs::ImageConstPtr, sensor_msgs::CameraInfo::ConstPtr, sensor_msgs::CameraInfo::ConstPtr>;
   auto message_ready = [this](const ImageInfoMsgPair& msg) {
-    return this->canTransform(msg.first->header);
+    return this->canTransform(std::get<0>(msg)->header);
   };
 
   processMessageQueue<ImageInfoMsgPair>(
@@ -537,16 +544,17 @@ bool NvbloxNode::isUpdateTooFrequent(const ros::Time& current_stamp,
 }
 
 bool NvbloxNode::processDepthImage(
-    const std::pair<sensor_msgs::ImageConstPtr,
-                    sensor_msgs::CameraInfo::ConstPtr>& depth_camera_pair) {
+    const std::tuple<sensor_msgs::ImageConstPtr,
+                     sensor_msgs::CameraInfo::ConstPtr,
+                     sensor_msgs::CameraInfo::ConstPtr>& depth_camera_pair) {
   ROS_DEBUG("Depth Image processing has started");
   timing::Timer ros_depth_timer("ros/depth");
   timing::Timer transform_timer("ros/depth/transform");
 
   // Message parts
-  const sensor_msgs::ImageConstPtr& depth_img_ptr = depth_camera_pair.first;
-  const sensor_msgs::CameraInfo::ConstPtr& camera_info_msg =
-      depth_camera_pair.second;
+  const sensor_msgs::ImageConstPtr& depth_img_ptr = std::get<0>(depth_camera_pair);
+  const sensor_msgs::CameraInfo::ConstPtr& left_camera_info_msg = std::get<1>(depth_camera_pair);
+  const sensor_msgs::CameraInfo::ConstPtr& right_camera_info_msg = std::get<2>(depth_camera_pair);
 
   // Check that we're not updating more quickly than we should.
   if (isUpdateTooFrequent(depth_img_ptr->header.stamp, last_depth_update_time_,
@@ -569,10 +577,12 @@ bool NvbloxNode::processDepthImage(
 
   timing::Timer conversions_timer("ros/depth/conversions");
   // Convert camera info message to camera object.
-  Camera camera = conversions::cameraFromMessage(*camera_info_msg);
+  Camera camera = conversions::cameraFromMessages(*left_camera_info_msg, *right_camera_info_msg);
 
+  conversions::QMatrix Q =
+      conversions::qMatFromMessages(*left_camera_info_msg, *right_camera_info_msg);
   // Convert the depth image.
-  if (!conversions::depthImageFromImageMessage(depth_img_ptr, &depth_image_)) {
+  if (!conversions::depthImageFromImageMessage(depth_img_ptr, &depth_image_, Q)) {
     ROS_ERROR("Failed to transform depth image.");
     return false;
   }

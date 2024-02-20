@@ -69,7 +69,8 @@ class NvbloxNode {
   // Callback functions. These just stick images in a queue.
   void depthImageCallback(
       const sensor_msgs::ImageConstPtr& depth_img_ptr,
-      const sensor_msgs::CameraInfo::ConstPtr& camera_info_msg);
+      const sensor_msgs::CameraInfo::ConstPtr& left_camera_info_msg,
+      const sensor_msgs::CameraInfo::ConstPtr& right_camera_info_msg);
   void colorImageCallback(
       const sensor_msgs::ImageConstPtr& color_img_ptr,
       const sensor_msgs::CameraInfo::ConstPtr& color_info_msg);
@@ -100,8 +101,9 @@ class NvbloxNode {
 
   // Process data
   virtual bool processDepthImage(
-      const std::pair<sensor_msgs::ImageConstPtr,
-                      sensor_msgs::CameraInfo::ConstPtr>& depth_camera_pair);
+      const std::tuple<sensor_msgs::ImageConstPtr,
+                       sensor_msgs::CameraInfo::ConstPtr,
+                       sensor_msgs::CameraInfo::ConstPtr>& depth_camera_pair);
   virtual bool processColorImage(
       const std::pair<sensor_msgs::ImageConstPtr,
                       sensor_msgs::CameraInfo::ConstPtr>& color_camera_pair);
@@ -173,16 +175,22 @@ class NvbloxNode {
 
   // Time Sync
   typedef message_filters::sync_policies::ExactTime<sensor_msgs::Image,
+                                                    sensor_msgs::CameraInfo,
                                                     sensor_msgs::CameraInfo>
       time_policy_t;
+
+  typedef message_filters::sync_policies::ExactTime<sensor_msgs::Image,
+                                                    sensor_msgs::CameraInfo>
+      color_time_policy_t;
 
   // Depth sub.
   std::shared_ptr<message_filters::Synchronizer<time_policy_t>> timesync_depth_;
   message_filters::Subscriber<sensor_msgs::Image> depth_sub_;
   message_filters::Subscriber<sensor_msgs::CameraInfo> depth_camera_info_sub_;
+  message_filters::Subscriber<sensor_msgs::CameraInfo> right_camera_info_sub_;
 
   // Color sub
-  std::shared_ptr<message_filters::Synchronizer<time_policy_t>> timesync_color_;
+  std::shared_ptr<message_filters::Synchronizer<color_time_policy_t>> timesync_color_;
   message_filters::Subscriber<sensor_msgs::Image> color_sub_;
   message_filters::Subscriber<sensor_msgs::CameraInfo> color_camera_info_sub_;
 
@@ -298,7 +306,7 @@ class NvbloxNode {
 
   // Image queues.
   std::deque<
-      std::pair<sensor_msgs::ImageConstPtr, sensor_msgs::CameraInfo::ConstPtr>>
+      std::tuple<sensor_msgs::ImageConstPtr, sensor_msgs::CameraInfo::ConstPtr, sensor_msgs::CameraInfo::ConstPtr>>
       depth_image_queue_;
   std::deque<
       std::pair<sensor_msgs::ImageConstPtr, sensor_msgs::CameraInfo::ConstPtr>>

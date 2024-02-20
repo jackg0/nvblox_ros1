@@ -285,7 +285,7 @@ bool NvbloxHumanNode::processDepthImage(
       conversions::cameraFromMessage(*mask_camera_info_msg);
 
   // Convert the depth image.
-  if (!conversions::depthImageFromImageMessage(depth_img_ptr, &depth_image_) ||
+  if (!conversions::depthImageFromImageMessage(depth_img_ptr, &depth_image_, std::nullopt) ||
       !conversions::monoImageFromImageMessage(mask_img_ptr, &mask_image_)) {
     ROS_ERROR("Failed to transform depth or mask image.");
     return false;
